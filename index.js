@@ -1,133 +1,151 @@
 import fetch from 'node-fetch';
 import { DateTime } from 'luxon';
 import fs from 'fs';
+import checkbox from '@inquirer/checkbox';
 
-const run = 1;
+const baseUrl = 'http://YOUR-ENIGMA2-BOX-IP';
+const dummyUrl = 'DUMMY-URL-FOR-XMLTV-DOCUMENT';
+const xmlpath = 'DIR-WHERE-TO-STORE-THE-XML-FILES';
 
-/*
-0 :: Eutelsat 9B
-1 :: OrangeTv :: Basic
-2 :: OrangeTV :: Premium
-3 :: OrangeTV :: Music
-4 :: DigiTV :: Basic
-5 :: DigiTV :: Premium
-6 :: DigiTV :: Music
-7 :: Sky/Freeview
-8 :: -----------------------------------------
-9 :: Astra :: 19.2E :: ProSiebenSat1
-10 :: Astra :: 23.5E :: M7
-11 :: -----------------------------------------
-12 :: Eutelsat :: 16.0E
-13 :: Hotbird :: 13.0E
-14 :: Astra :: 19.2E
-15 :: Astra :: 23.5E
-16 :: Hellas :: 39.0E
-17 :: FocusSAT - Separator
-18 :: Telekom Romania - Separator
-19 :: Sky UK - Separator
-20 :: Movistar+ Esp - Separator
-21 :: Canal Digitaal HD - Separator
-22 :: MEO - Separator
-23 :: Last Scanned
-24 :: Favourites (TV)
-*/
+const defaultLang = 'en';
+const dataFileName = 'bouquetes.json';
 
-const enabledBouquetes = [
-    0,
-    2,
-    5,
-    9, 10
-]
+let enabledBouquetes;
 
-const baseUrl = 'http://192.168.0.30';
-const dummyUrl = 'https://myownsummer.co.uk';
-const xmlpath = '/home/pi/EPG';
+const readDataFile = async () => {
+    try {
+        const data = await fs.promises.readFile(dataFileName, 'utf-8');
+        enabledBouquetes = JSON.parse(data);
+    } catch (err) {
+        enabledBouquetes = null;
+    }
+};
 
-const getEpg = async (bRef) => (await fetch(`${baseUrl}/api/epgmulti?bRef=${bRef}`)).json()
+const getEpg = async (bRef) => {
+    const response = await fetch(`${baseUrl}/api/epgmulti?bRef=${bRef}`);
+    return response.json();
+};
 
-const getBouquetes = async () => (await fetch(`${baseUrl}/api/bouquets`)).json();
+const getBouquetes = async () => {
+    const response = await fetch(`${baseUrl}/api/bouquets`);
+    return response.json();
+};
 
-const getServices = async (sRef) => (await fetch(`${baseUrl}/api/getservices?sRef=${sRef}`)).json();
+const getServices = async (sRef) => {
+    const response = await fetch(`${baseUrl}/api/getservices?sRef=${sRef}`);
+    return response.json();
+};
 
-const channelsRefs = {}
+const channelsRefs = {};
 
-const getXMLTVHeader = () => `<tv generator-info-name="enigma2epg grabber" generator-info-url="${dummyUrl}">
+const getXMLTVHeader = () => `
+<tv generator-info-name="enigma2epg grabber" generator-info-url="${dummyUrl}">
 `;
 
 const buildPiconPath = (ref) => {
-    const segments = ref.substring(0, ref.length-1).split(':');
+    const segments = ref.slice(0, -1).split(':');
     segments[2] = '1';
-
     return `${segments.join('_')}.png`;
-}
+};
+
+const getFilename = (title) => `${title.replace(/[ /:]/g, '')}.xml`;
+
+const xmlSafe = (string) => {
+    return string.replace(/[&"'<>\t\n\r]/g, (match) => {
+        const replacements = {
+            '&': '&amp;',
+            '"': '&quot;',
+            "'": '&apos;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '\t': '&#x9;',
+            '\n': '&#xA;',
+            '\r': '&#xD;',
+        };
+        return replacements[match];
+    });
+};
 
 const getXMLTVChannels = (channels) => {
-    let xmlString = '';
-    channels.services.map(c => {
-        xmlString += `
-    <channel id="${c.servicename}">
-        <display-name lang="ro">${c.servicename}</display-name>
+    return channels.services
+        .map((c) => `
+    <channel id="${xmlSafe(c.servicename)}">
+        <display-name lang="${defaultLang}">${xmlSafe(c.servicename)}</display-name>
         <icon src="${baseUrl}/picon/${buildPiconPath(c.servicereference)}" />
         <url>${dummyUrl}</url>
     </channel>`
-    });
-    return xmlString;
-}
+        )
+        .join('');
+};
 
 const parseEPG = (epg) => {
-    let epgData = '';
-    epg.events.map(e => {
-        epgData += `
-<programme start="${DateTime.fromSeconds(e.begin_timestamp).toFormat('yyyyMMddHHmm00')} +0000" stop="${DateTime.fromSeconds(e.begin_timestamp+e.duration_sec).toFormat('yyyyMMddHHmm00')} +0000" channel="${channelsRefs[e.sref]}">
-    <title lang="ro">${e.title}</title>
-    <desc lang="ro">${e.longdesc}</desc>
-    <category lang="ro">${e.genre}</category>
-</programme>`;
-    })
-
-    return epgData;
-}
+    return epg.events
+        .map((e) => `
+<programme start="${DateTime.fromSeconds(e.begin_timestamp).toFormat('yyyyMMddHHmm00')} +0000" stop="${DateTime.fromSeconds(e.begin_timestamp + e.duration_sec).toFormat('yyyyMMddHHmm00')} +0000" channel="${channelsRefs[e.sref]}">
+    <title lang="${defaultLang}">${xmlSafe(e.title)}</title>
+    <desc lang="${defaultLang}">${xmlSafe(e.longdesc)}</desc>
+    <category lang="${defaultLang}">${xmlSafe(e.genre)}</category>
+</programme>`
+        )
+        .join('');
+};
 
 const buildXMLTV = (epg, channels) => {
-    let xmltv = getXMLTVHeader();
-
-    xmltv += `${getXMLTVChannels(channels)}
+    const xmltv = getXMLTVHeader() + `
+    ${getXMLTVChannels(channels)}
     ${parseEPG(epg)}
 </tv>`;
-
     return xmltv;
-}
+};
 
-(async() => {
+(async () => {
+    await readDataFile();
+    const bouquetes = await getBouquetes();
 
-    const bouquetes = (await getBouquetes());
-
-    if (!run) {
+    if (!enabledBouquetes) {
+        
         let cnt = 0;
-        bouquetes.bouquets.forEach(b  => {
-            console.log(`${cnt} :: ${b[1]}`);
-            cnt++;
+        enabledBouquetes = await checkbox({
+            message: 'Select the bouquetes:',
+            choices: bouquetes.bouquets.map((bItem) => {
+                return {
+                    name: `${bItem[1]}`,
+                    value: cnt++,
+                };
+            }),
+            pageSize: 20,
+            loop: false,
         });
-        return;
+
+        fs.promises.writeFile(dataFileName, JSON.stringify(enabledBouquetes))
+            .then(() => {
+                console.log(`Successfully saved the processing bouquetes. 
+Next time if you want to change the list to be processed delete 
+the file "${dataFileName}" from this directory and manually re-run 
+it with "node index.js".
+`);
+            })
+            .catch((err) => {
+                console.error(err);
+            });
     }
 
-    enabledBouquetes.forEach(async bIndex => {
-        const bRef = bouquetes.bouquets[bIndex][0];
-        const bName = bouquetes.bouquets[bIndex][1];
+    for (const bIndex of enabledBouquetes) {
+        const bRef = bouquetes.bouquets[Number(bIndex)][0];
+        const bName = bouquetes.bouquets[Number(bIndex)][1];
 
         const services = await getServices(bRef);
-        services.services.map(s => channelsRefs[s.servicereference] = s.servicename )
+        services.services.forEach((s) => (channelsRefs[s.servicereference] = s.servicename));
 
         const epg = await getEpg(bRef);
         const xmltv = buildXMLTV(epg, services).replaceAll('&', '&amp;');
-        const filename = `${xmlpath}/${bName.replaceAll(' ', '').replaceAll(':','')}.xml`; 
+        const filename = `${xmlpath}/${getFilename(bName)}`;
 
         try {
-            fs.writeFileSync(filename, xmltv);
+            await fs.promises.writeFile(filename, xmltv);
             console.log(`Generated file ${filename}`);
-          } catch (err) {
+        } catch (err) {
             console.error(err);
-          }
-
-    });
-})()
+        }
+    }
+})();
